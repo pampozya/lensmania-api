@@ -1094,6 +1094,84 @@ def delete_notification(nid: int, email: str = Depends(verify_token), db: Sessio
     if n: db.delete(n); db.commit()
     return {"ok": True}
 
+# ==================== AUTO THUMBNAIL FETCH ====================
+
+class ThumbnailRequest(BaseModel):
+    url: str
+
+@app.post("/api/fetch-thumbnail")
+async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_token)):
+    url = data.url.strip()
+
+    # YouTube
+    import re
+    yt = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})', url)
+    if yt:
+        vid = yt.group(1)
+        for quality in ['maxresdefault', 'hqdefault', 'mqdefault']:
+            thumb = f"https://img.youtube.com/vi/{vid}/{quality}.jpg"
+            try:
+                async with httpx.AsyncClient(timeout=5) as c:
+                    r = await c.head(thumb)
+                    if r.status_code == 200:
+                        return {"thumbnail_url": thumb, "platform": "youtube"}
+            except: pass
+        return {"thumbnail_url": f"https://img.youtube.com/vi/{vid}/hqdefault.jpg", "platform": "youtube"}
+
+    # Vimeo
+    if 'vimeo.com' in url:
+        try:
+            async with httpx.AsyncClient(timeout=8) as c:
+                r = await c.get(f"https://vimeo.com/api/oembed.json?url={url}&width=1280")
+                d = r.json()
+                if d.get('thumbnail_url'):
+                    return {"thumbnail_url": d['thumbnail_url'], "platform": "vimeo"}
+        except: pass
+
+    # TikTok
+    if 'tiktok.com' in url:
+        try:
+            async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as c:
+                r = await c.get(f"https://www.tiktok.com/oembed?url={url}")
+                d = r.json()
+                if d.get('thumbnail_url'):
+                    return {"thumbnail_url": d['thumbnail_url'], "platform": "tiktok"}
+        except: pass
+
+    # Dailymotion
+    if 'dailymotion.com' in url:
+        dm = re.search(r'video/([a-z0-9]+)', url, re.I)
+        if dm:
+            try:
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(f"https://api.dailymotion.com/video/{dm.group(1)}?fields=thumbnail_1080_url,thumbnail_url")
+                    d = r.json()
+                    thumb = d.get('thumbnail_1080_url') or d.get('thumbnail_url')
+                    if thumb:
+                        return {"thumbnail_url": thumb, "platform": "dailymotion"}
+            except: pass
+
+    # Twitter/X
+    if 'twitter.com' in url or 'x.com' in url:
+        try:
+            async with httpx.AsyncClient(timeout=8) as c:
+                r = await c.get(f"https://publish.twitter.com/oembed?url={url}")
+                d = r.json()
+                # Twitter oembed doesn't return thumbnails directly, return None
+        except: pass
+
+    # Instagram — try oembed (may require token)
+    if 'instagram.com' in url:
+        try:
+            async with httpx.AsyncClient(timeout=8) as c:
+                r = await c.get(f"https://api.instagram.com/oembed?url={url}")
+                d = r.json()
+                if d.get('thumbnail_url'):
+                    return {"thumbnail_url": d['thumbnail_url'], "platform": "instagram"}
+        except: pass
+
+    return {"thumbnail_url": None, "platform": "unknown"}
+
 # ==================== AI ENDPOINTS ====================
 
 def _get_anthropic():
