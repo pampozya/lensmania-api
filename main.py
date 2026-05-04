@@ -3,11 +3,11 @@ Mahmoud Dessoki Portfolio - FastAPI Backend
 Full-stack portfolio management system with admin dashboard
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Request, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from pydantic import BaseModel
 from datetime import datetime, timedelta
@@ -17,6 +17,12 @@ import shutil
 import uuid
 import jwt
 import os
+import smtplib
+import ssl
+import httpx
+import asyncio
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -132,6 +138,15 @@ class Settings(Base):
     about_text = Column(Text, nullable=True)
     about_image = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Visit(Base):
+    __tablename__ = "visits"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    ip = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -500,6 +515,105 @@ async def upload_file(
         shutil.copyfileobj(file.file, buf)
 
     return {"url": f"/uploads/{filename}", "filename": filename}
+
+# ==================== ANALYTICS & TRACKING ====================
+
+async def _get_location(ip: str):
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"https://ipapi.co/{ip}/json/")
+            d = r.json()
+            return d.get("country_name"), d.get("city")
+    except Exception:
+        return None, None
+
+async def _send_visit_email(ip: str, country: str, city: str, ua: str, ts: datetime):
+    host = os.getenv("SMTP_HOST", "smtp.hostinger.com")
+    port = int(os.getenv("SMTP_PORT", "465"))
+    user = os.getenv("SMTP_USER", "")
+    pwd  = os.getenv("SMTP_PASS", "")
+    to   = os.getenv("NOTIFY_EMAIL", os.getenv("ADMIN_EMAIL", ""))
+    if not all([user, pwd, to]):
+        return
+    msg = MIMEMultipart()
+    msg["From"] = user
+    msg["To"] = to
+    msg["Subject"] = f"📍 New Portfolio Visit — {city or 'Unknown'}, {country or 'Unknown'}"
+    body = (
+        f"New visitor on lensmania.ae/portfolio\n\n"
+        f"Time:     {ts.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Location: {city or 'Unknown'}, {country or 'Unknown'}\n"
+        f"IP:       {ip}\n"
+        f"Device:   {ua[:120] if ua else 'Unknown'}\n"
+    )
+    msg.attach(MIMEText(body, "plain"))
+    def _send():
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(host, port, context=ctx) as s:
+            s.login(user, pwd)
+            s.send_message(msg)
+    try:
+        await asyncio.to_thread(_send)
+    except Exception as e:
+        print(f"Email error: {e}")
+
+async def _enrich_visit(visit_id: int, ip: str, ua: str, ts: datetime):
+    country, city = await _get_location(ip)
+    db = SessionLocal()
+    try:
+        v = db.query(Visit).filter(Visit.id == visit_id).first()
+        if v:
+            v.country = country
+            v.city = city
+            db.commit()
+    finally:
+        db.close()
+    if os.getenv("VISIT_NOTIFICATIONS", "false").lower() == "true":
+        db2 = SessionLocal()
+        try:
+            one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+            recent_count = db2.query(Visit).filter(Visit.ip == ip, Visit.timestamp >= one_hour_ago).count()
+        finally:
+            db2.close()
+        if recent_count <= 1:
+            await _send_visit_email(ip, country, city, ua, ts)
+
+@app.post("/api/track")
+async def track_visit(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+    ua = request.headers.get("User-Agent", "")[:200]
+    visit = Visit(ip=ip, user_agent=ua)
+    db.add(visit)
+    db.commit()
+    db.refresh(visit)
+    background_tasks.add_task(_enrich_visit, visit.id, ip, ua, visit.timestamp)
+    return {"ok": True}
+
+@app.get("/api/analytics")
+def get_analytics(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    total = db.query(Visit).count()
+    recent = db.query(Visit).order_by(Visit.timestamp.desc()).limit(50).all()
+    by_country = (
+        db.query(Visit.country, func.count(Visit.id).label("count"))
+        .group_by(Visit.country)
+        .order_by(func.count(Visit.id).desc())
+        .limit(15).all()
+    )
+    thirty_ago = datetime.utcnow() - timedelta(days=30)
+    by_day = (
+        db.query(func.date(Visit.timestamp).label("date"), func.count(Visit.id).label("count"))
+        .filter(Visit.timestamp >= thirty_ago)
+        .group_by(func.date(Visit.timestamp))
+        .order_by(func.date(Visit.timestamp))
+        .all()
+    )
+    return {
+        "total": total,
+        "recent": [{"id": v.id, "timestamp": str(v.timestamp)[:16], "ip": v.ip, "country": v.country or "Unknown", "city": v.city or "Unknown", "ua": (v.user_agent or "")[:60]} for v in recent],
+        "by_country": [{"country": c.country or "Unknown", "count": c.count} for c in by_country],
+        "by_day": [{"date": str(d.date), "count": d.count} for d in by_day],
+    }
 
 # ==================== HEALTH CHECK ====================
 
