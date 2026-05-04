@@ -529,16 +529,16 @@ async def _get_location(ip: str):
 
 async def _send_visit_email(ip: str, country: str, city: str, ua: str, ts: datetime):
     host = os.getenv("SMTP_HOST", "smtp.hostinger.com")
-    port = int(os.getenv("SMTP_PORT", "465"))
     user = os.getenv("SMTP_USER", "")
     pwd  = os.getenv("SMTP_PASS", "")
     to   = os.getenv("NOTIFY_EMAIL", os.getenv("ADMIN_EMAIL", ""))
     if not all([user, pwd, to]):
+        print(f"[Email] Missing config — user={bool(user)} pwd={bool(pwd)} to={bool(to)}")
         return
     msg = MIMEMultipart()
     msg["From"] = user
     msg["To"] = to
-    msg["Subject"] = f"📍 New Portfolio Visit — {city or 'Unknown'}, {country or 'Unknown'}"
+    msg["Subject"] = f"New Portfolio Visit — {city or 'Unknown'}, {country or 'Unknown'}"
     body = (
         f"New visitor on lensmania.ae/portfolio\n\n"
         f"Time:     {ts.strftime('%Y-%m-%d %H:%M UTC')}\n"
@@ -548,14 +548,29 @@ async def _send_visit_email(ip: str, country: str, city: str, ua: str, ts: datet
     )
     msg.attach(MIMEText(body, "plain"))
     def _send():
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, context=ctx) as s:
-            s.login(user, pwd)
-            s.send_message(msg)
+        # Try port 587 STARTTLS first (most common for Hostinger)
+        try:
+            with smtplib.SMTP(host, 587, timeout=10) as s:
+                s.ehlo()
+                s.starttls(context=ssl.create_default_context())
+                s.login(user, pwd)
+                s.send_message(msg)
+                print(f"[Email] Sent via 587 STARTTLS to {to}")
+                return
+        except Exception as e1:
+            print(f"[Email] Port 587 failed: {e1}")
+        # Fallback: port 465 SSL
+        try:
+            with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=10) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+                print(f"[Email] Sent via 465 SSL to {to}")
+        except Exception as e2:
+            print(f"[Email] Port 465 failed: {e2}")
     try:
         await asyncio.to_thread(_send)
     except Exception as e:
-        print(f"Email error: {e}")
+        print(f"[Email] Thread error: {e}")
 
 async def _enrich_visit(visit_id: int, ip: str, ua: str, ts: datetime):
     country, city = await _get_location(ip)
