@@ -106,6 +106,7 @@ class Portfolio(Base):
     embed_code = Column(Text, nullable=True)
     views = Column(Integer, default=0)
     likes = Column(Integer, default=0)
+    reactions = Column(Text, nullable=True)
     featured = Column(Boolean, default=False)
     order = Column(Integer, default=0)
     aspect_ratio = Column(String, default="16:9")
@@ -152,6 +153,8 @@ class Settings(Base):
     site_description_ar = Column(Text, nullable=True)
     about_text_ar = Column(Text, nullable=True)
     booking_enabled = Column(Boolean, default=True)
+    available_for_booking = Column(Boolean, default=True)
+    availability_text = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Testimonial(Base):
@@ -164,6 +167,31 @@ class Testimonial(Base):
     photo_url = Column(String, nullable=True)
     order = Column(Integer, default=0)
     active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    type = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=True)
+    read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+class VideoView(Base):
+    __tablename__ = "video_views"
+    id = Column(Integer, primary_key=True, index=True)
+    portfolio_id = Column(Integer, index=True)
+    ip = Column(String, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+class ContactSubmission(Base):
+    __tablename__ = "contact_submissions"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    email = Column(String)
+    service = Column(String, nullable=True)
+    message = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Visit(Base):
@@ -260,6 +288,7 @@ class PortfolioResponse(BaseModel):
     embed_code: Optional[str]
     views: int
     likes: int = 0
+    reactions: Optional[str]
     featured: bool
     order: int
     aspect_ratio: str = "16:9"
@@ -343,7 +372,28 @@ class SettingsResponse(BaseModel):
     site_description_ar: Optional[str]
     about_text_ar: Optional[str]
     booking_enabled: bool = True
+    available_for_booking: bool = True
+    availability_text: Optional[str]
 
+    class Config:
+        from_attributes = True
+
+class ReactRequest(BaseModel):
+    reaction: str
+
+class ContactRequest(BaseModel):
+    name: str
+    email: str
+    service: Optional[str] = None
+    message: str
+
+class NotificationResponse(BaseModel):
+    id: int
+    type: str
+    title: str
+    body: Optional[str]
+    read: bool
+    created_at: datetime
     class Config:
         from_attributes = True
 
@@ -750,6 +800,10 @@ def like_portfolio(item_id: int, db: Session = Depends(get_db)):
     if not item: raise HTTPException(404, "Not found")
     item.likes = (item.likes or 0) + 1
     db.commit()
+    try:
+        notif = Notification(type="like", title=f"❤️ New like on \"{item.title}\"")
+        db.add(notif); db.commit()
+    except: pass
     return {"likes": item.likes}
 
 # ==================== DUPLICATE ====================
@@ -807,6 +861,115 @@ def export_data(email: str = Depends(verify_token), db: Session = Depends(get_db
         "portfolio": [{"id": p.id, "title": p.title, "video_url": p.video_url, "views": p.views, "likes": p.likes} for p in portfolio],
         "testimonials": [{"name": t.name, "role": t.role, "text": t.text, "rating": t.rating} for t in testimonials],
     }
+
+# ==================== REACTIONS ====================
+
+import json as _json
+
+@app.post("/api/portfolio/{item_id}/react")
+def react_portfolio(item_id: int, req: ReactRequest, db: Session = Depends(get_db)):
+    item = db.query(Portfolio).filter(Portfolio.id == item_id).first()
+    if not item: raise HTTPException(404, "Not found")
+    valid = {"heart", "fire", "clap", "wow"}
+    if req.reaction not in valid: raise HTTPException(400, "Invalid reaction")
+    r = _json.loads(item.reactions or '{"heart":0,"fire":0,"clap":0,"wow":0}')
+    r[req.reaction] = r.get(req.reaction, 0) + 1
+    item.reactions = _json.dumps(r)
+    db.commit()
+    # Create notification
+    try:
+        notif = Notification(type="reaction", title=f"New {req.reaction} reaction on \"{item.title}\"")
+        db.add(notif); db.commit()
+    except: pass
+    return r
+
+# ==================== VIDEO VIEW TRACKING ====================
+
+@app.post("/api/portfolio/{item_id}/view-track")
+async def track_video_view(item_id: int, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+    view = VideoView(portfolio_id=item_id, ip=ip)
+    db.add(view); db.commit()
+    one_hour_ago = datetime.utcnow() - timedelta(hours=24)
+    count = db.query(VideoView).filter(VideoView.portfolio_id == item_id, VideoView.ip == ip, VideoView.timestamp >= one_hour_ago).count()
+    if count >= 3:
+        item = db.query(Portfolio).filter(Portfolio.id == item_id).first()
+        title = item.title if item else f"Video #{item_id}"
+        existing = db.query(Notification).filter(Notification.type == "interested", Notification.title.contains(title)).order_by(Notification.created_at.desc()).first()
+        if not existing or (datetime.utcnow() - existing.created_at).seconds > 3600:
+            notif = Notification(type="interested", title=f"🔥 Hot lead! Someone watched \"{title}\" {count} times", body=f"IP: {ip}")
+            db.add(notif); db.commit()
+            background_tasks.add_task(_send_interested_email, title, count, ip)
+    return {"ok": True}
+
+async def _send_interested_email(title: str, count: int, ip: str):
+    host = os.getenv("SMTP_HOST", "smtp.hostinger.com")
+    user = os.getenv("SMTP_USER", ""); pwd = os.getenv("SMTP_PASS", "")
+    to = os.getenv("NOTIFY_EMAIL", os.getenv("ADMIN_EMAIL", ""))
+    if not all([user, pwd, to]): return
+    msg = MIMEMultipart()
+    msg["From"] = user; msg["To"] = to
+    msg["Subject"] = f"🔥 Hot Lead — Someone watched \"{title}\" {count} times!"
+    msg.attach(MIMEText(f"A potential client has viewed \"{title}\" {count} times in the last 24 hours.\n\nIP: {ip}\n\nConsider reaching out!", "plain"))
+    def _send():
+        try:
+            with smtplib.SMTP(host, 587, timeout=10) as s:
+                s.ehlo(); s.starttls(context=ssl.create_default_context()); s.login(user, pwd); s.send_message(msg)
+        except Exception as e: print(f"[Email] {e}")
+    try: await asyncio.to_thread(_send)
+    except: pass
+
+# ==================== CONTACT FORM ====================
+
+@app.post("/api/contact")
+async def submit_contact(data: ContactRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    submission = ContactSubmission(name=data.name, email=data.email, service=data.service, message=data.message)
+    db.add(submission); db.commit()
+    notif = Notification(type="contact", title=f"📩 New inquiry from {data.name}", body=f"Service: {data.service or 'Not specified'}\n{data.message[:100]}")
+    db.add(notif); db.commit()
+    background_tasks.add_task(_send_contact_email, data)
+    return {"ok": True}
+
+async def _send_contact_email(data: ContactRequest):
+    host = os.getenv("SMTP_HOST", "smtp.hostinger.com")
+    user = os.getenv("SMTP_USER", ""); pwd = os.getenv("SMTP_PASS", "")
+    to = os.getenv("NOTIFY_EMAIL", os.getenv("ADMIN_EMAIL", ""))
+    if not all([user, pwd, to]): return
+    msg = MIMEMultipart()
+    msg["From"] = user; msg["To"] = to
+    msg["Subject"] = f"📩 New Portfolio Inquiry from {data.name}"
+    msg.attach(MIMEText(f"Name: {data.name}\nEmail: {data.email}\nService: {data.service or 'Not specified'}\n\n{data.message}", "plain"))
+    def _send():
+        try:
+            with smtplib.SMTP(host, 587, timeout=10) as s:
+                s.ehlo(); s.starttls(context=ssl.create_default_context()); s.login(user, pwd); s.send_message(msg)
+        except Exception as e: print(f"[Email] {e}")
+    try: await asyncio.to_thread(_send)
+    except: pass
+
+# ==================== NOTIFICATIONS ====================
+
+@app.get("/api/notifications", response_model=List[NotificationResponse])
+def get_notifications(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    return db.query(Notification).order_by(Notification.created_at.desc()).limit(50).all()
+
+@app.get("/api/notifications/unread-count")
+def get_unread_count(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    count = db.query(Notification).filter(Notification.read == False).count()
+    return {"count": count}
+
+@app.put("/api/notifications/read-all")
+def mark_all_read(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    db.query(Notification).filter(Notification.read == False).update({"read": True})
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/notifications/{nid}")
+def delete_notification(nid: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    n = db.query(Notification).filter(Notification.id == nid).first()
+    if n: db.delete(n); db.commit()
+    return {"ok": True}
 
 # ==================== HEALTH CHECK ====================
 
