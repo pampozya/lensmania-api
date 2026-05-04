@@ -126,7 +126,11 @@ class Settings(Base):
     instagram = Column(String, nullable=True)
     youtube = Column(String, nullable=True)
     linkedin = Column(String, nullable=True)
+    whatsapp = Column(String, nullable=True)
     hero_image = Column(String, nullable=True)
+    showreel_url = Column(String, nullable=True)
+    about_text = Column(Text, nullable=True)
+    about_image = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 # Create tables
@@ -238,7 +242,11 @@ class SettingsResponse(BaseModel):
     instagram: Optional[str]
     youtube: Optional[str]
     linkedin: Optional[str]
+    whatsapp: Optional[str]
     hero_image: Optional[str]
+    showreel_url: Optional[str]
+    about_text: Optional[str]
+    about_image: Optional[str]
 
     class Config:
         from_attributes = True
