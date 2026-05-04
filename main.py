@@ -698,22 +698,14 @@ ALLOWED_EXTENSIONS = {
 
 @app.post("/api/upload-signature")
 def get_upload_signature(email: str = Depends(verify_token)):
-    """Return a signed Cloudinary upload credential for direct browser upload."""
+    """Return Cloudinary config for direct browser upload via unsigned preset."""
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
-    api_key = os.getenv("CLOUDINARY_API_KEY")
-    api_secret = os.getenv("CLOUDINARY_API_SECRET")
-    if not all([cloud_name, api_key, api_secret]):
+    preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "")
+    if not cloud_name:
         raise HTTPException(503, "Cloudinary not configured")
-    import cloudinary.utils, time
-    timestamp = int(time.time())
-    params = {"folder": "lensmania", "timestamp": timestamp}
-    signature = cloudinary.utils.api_sign_request(params, api_secret)
     return {
         "cloud_name": cloud_name,
-        "api_key": api_key,
-        "timestamp": timestamp,
-        "signature": signature,
-        "folder": "lensmania",
+        "upload_preset": preset,
     }
 
 def _cloudinary_upload(file_bytes: bytes, resource_type: str = "auto"):
