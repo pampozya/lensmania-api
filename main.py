@@ -988,6 +988,88 @@ def delete_notification(nid: int, email: str = Depends(verify_token), db: Sessio
     if n: db.delete(n); db.commit()
     return {"ok": True}
 
+# ==================== AI ENDPOINTS ====================
+
+def _get_anthropic():
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI not configured — add ANTHROPIC_API_KEY to Render environment variables")
+    try:
+        import anthropic
+        return anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        raise HTTPException(503, "Anthropic package not installed")
+
+class AIChatRequest(BaseModel):
+    message: str
+    context: Optional[str] = None
+
+class AIThumbnailRequest(BaseModel):
+    frames: List[str]  # base64 JPEG strings
+    title: Optional[str] = None
+
+@app.post("/api/ai/chat")
+async def ai_chat(data: AIChatRequest, email: str = Depends(verify_token)):
+    client = _get_anthropic()
+    system = (
+        "You are an AI assistant built into the admin dashboard of a professional videography "
+        "portfolio website for Mahmoud Adel, based in Dubai, UAE (lensmania.ae). "
+        "Help with: writing portfolio descriptions, SEO titles/descriptions, bio/about text, "
+        "testimonial replies, content ideas, social media captions, and technical guidance. "
+        "Be concise, creative, and professional. Tone: modern, cinematic, premium."
+    )
+    if data.context:
+        system += f"\n\nCurrent context: {data.context}"
+    def _call():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": data.message}]
+        )
+    try:
+        response = await asyncio.to_thread(_call)
+        return {"response": response.content[0].text}
+    except Exception as e:
+        raise HTTPException(500, f"AI error: {str(e)}")
+
+@app.post("/api/ai/best-thumbnail")
+async def ai_best_thumbnail(data: AIThumbnailRequest, email: str = Depends(verify_token)):
+    if not data.frames:
+        raise HTTPException(400, "No frames provided")
+    client = _get_anthropic()
+    content = [{
+        "type": "text",
+        "text": (
+            f"You are a professional creative director. I'm showing you {len(data.frames)} frames "
+            f"from a video{f' titled \"{data.title}\"' if data.title else ''}. "
+            "Pick the BEST thumbnail for a premium videography portfolio website. "
+            "Consider: composition, lighting, visual impact, face expressions (if any), and cinematic quality. "
+            "Reply with ONLY: the frame number (1-based) followed by a comma and a short reason under 15 words. "
+            "Example: '3, Strong composition with dramatic lighting and clear subject focus'"
+        )
+    }]
+    for i, frame_b64 in enumerate(data.frames[:6]):
+        content.append({"type": "text", "text": f"Frame {i + 1}:"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}})
+
+    def _call():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=80,
+            messages=[{"role": "user", "content": content}]
+        )
+    try:
+        response = await asyncio.to_thread(_call)
+        text = response.content[0].text.strip()
+        import re
+        match = re.search(r'\b([1-6])\b', text)
+        best = int(match.group(1)) - 1 if match else 0
+        reason = text.split(',', 1)[1].strip() if ',' in text else text
+        return {"best_frame": best, "reason": reason}
+    except Exception as e:
+        raise HTTPException(500, f"AI error: {str(e)}")
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/api/health")
