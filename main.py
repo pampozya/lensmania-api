@@ -102,11 +102,17 @@ class Portfolio(Base):
     description = Column(Text, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     video_url = Column(String, nullable=True)
-    video_type = Column(String, default="youtube")  # youtube, vimeo, direct
+    video_type = Column(String, default="youtube")
     embed_code = Column(Text, nullable=True)
     views = Column(Integer, default=0)
+    likes = Column(Integer, default=0)
     featured = Column(Boolean, default=False)
     order = Column(Integer, default=0)
+    aspect_ratio = Column(String, default="16:9")
+    collaborators = Column(Text, nullable=True)
+    bts_photos = Column(Text, nullable=True)
+    seo_title = Column(String, nullable=True)
+    seo_description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -133,11 +139,32 @@ class Settings(Base):
     youtube = Column(String, nullable=True)
     linkedin = Column(String, nullable=True)
     whatsapp = Column(String, nullable=True)
+    tiktok = Column(String, nullable=True)
+    snapchat = Column(String, nullable=True)
     hero_image = Column(String, nullable=True)
     showreel_url = Column(String, nullable=True)
     about_text = Column(Text, nullable=True)
     about_image = Column(String, nullable=True)
+    reel_of_month_id = Column(Integer, nullable=True)
+    ga_tracking_id = Column(String, nullable=True)
+    maintenance_mode = Column(Boolean, default=False)
+    site_title_ar = Column(String, nullable=True)
+    site_description_ar = Column(Text, nullable=True)
+    about_text_ar = Column(Text, nullable=True)
+    booking_enabled = Column(Boolean, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Testimonial(Base):
+    __tablename__ = "testimonials"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    role = Column(String, nullable=True)
+    text = Column(Text, nullable=False)
+    rating = Column(Integer, default=5)
+    photo_url = Column(String, nullable=True)
+    order = Column(Integer, default=0)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Visit(Base):
     __tablename__ = "visits"
@@ -201,6 +228,11 @@ class PortfolioCreate(BaseModel):
     embed_code: Optional[str] = None
     featured: bool = False
     order: int = 0
+    aspect_ratio: str = "16:9"
+    collaborators: Optional[str] = None
+    bts_photos: Optional[str] = None
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
 
 class PortfolioUpdate(BaseModel):
     title: Optional[str] = None
@@ -211,6 +243,11 @@ class PortfolioUpdate(BaseModel):
     embed_code: Optional[str] = None
     featured: Optional[bool] = None
     order: Optional[int] = None
+    aspect_ratio: Optional[str] = None
+    collaborators: Optional[str] = None
+    bts_photos: Optional[str] = None
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
 
 class PortfolioResponse(BaseModel):
     id: int
@@ -222,13 +259,48 @@ class PortfolioResponse(BaseModel):
     video_type: str
     embed_code: Optional[str]
     views: int
+    likes: int = 0
     featured: bool
     order: int
+    aspect_ratio: str = "16:9"
+    collaborators: Optional[str]
+    bts_photos: Optional[str]
+    seo_title: Optional[str]
+    seo_description: Optional[str]
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
+
+class TestimonialCreate(BaseModel):
+    name: str
+    role: Optional[str] = None
+    text: str
+    rating: int = 5
+    photo_url: Optional[str] = None
+    order: int = 0
+
+class TestimonialResponse(BaseModel):
+    id: int
+    name: str
+    role: Optional[str]
+    text: str
+    rating: int
+    photo_url: Optional[str]
+    order: int
+    active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class CategoryReorderRequest(BaseModel):
+    ids: List[int]
 
 class AboutCreate(BaseModel):
     title: str
@@ -250,18 +322,27 @@ class AboutResponse(BaseModel):
 class SettingsResponse(BaseModel):
     id: int
     site_title: str
-    site_description: str
-    email: str
+    site_description: Optional[str]
+    email: Optional[str]
     phone: Optional[str]
-    location: str
+    location: Optional[str]
     instagram: Optional[str]
     youtube: Optional[str]
     linkedin: Optional[str]
     whatsapp: Optional[str]
+    tiktok: Optional[str]
+    snapchat: Optional[str]
     hero_image: Optional[str]
     showreel_url: Optional[str]
     about_text: Optional[str]
     about_image: Optional[str]
+    reel_of_month_id: Optional[int]
+    ga_tracking_id: Optional[str]
+    maintenance_mode: bool = False
+    site_title_ar: Optional[str]
+    site_description_ar: Optional[str]
+    about_text_ar: Optional[str]
+    booking_enabled: bool = True
 
     class Config:
         from_attributes = True
@@ -628,6 +709,103 @@ def get_analytics(email: str = Depends(verify_token), db: Session = Depends(get_
         "recent": [{"id": v.id, "timestamp": str(v.timestamp)[:16], "ip": v.ip, "country": v.country or "Unknown", "city": v.city or "Unknown", "ua": (v.user_agent or "")[:60]} for v in recent],
         "by_country": [{"country": c.country or "Unknown", "count": c.count} for c in by_country],
         "by_day": [{"date": str(d.date), "count": d.count} for d in by_day],
+    }
+
+# ==================== TESTIMONIALS ====================
+
+@app.get("/api/testimonials", response_model=List[TestimonialResponse])
+def get_testimonials(db: Session = Depends(get_db)):
+    return db.query(Testimonial).filter(Testimonial.active == True).order_by(Testimonial.order).all()
+
+@app.get("/api/testimonials/all", response_model=List[TestimonialResponse])
+def get_all_testimonials(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    return db.query(Testimonial).order_by(Testimonial.order).all()
+
+@app.post("/api/testimonials", response_model=TestimonialResponse)
+def create_testimonial(t: TestimonialCreate, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = Testimonial(**t.model_dump())
+    db.add(item); db.commit(); db.refresh(item)
+    return item
+
+@app.put("/api/testimonials/{tid}", response_model=TestimonialResponse)
+def update_testimonial(tid: int, t: TestimonialCreate, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = db.query(Testimonial).filter(Testimonial.id == tid).first()
+    if not item: raise HTTPException(404, "Not found")
+    for k, v in t.model_dump().items(): setattr(item, k, v)
+    db.commit(); db.refresh(item)
+    return item
+
+@app.delete("/api/testimonials/{tid}")
+def delete_testimonial(tid: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = db.query(Testimonial).filter(Testimonial.id == tid).first()
+    if not item: raise HTTPException(404, "Not found")
+    db.delete(item); db.commit()
+    return {"ok": True}
+
+# ==================== LIKES ====================
+
+@app.post("/api/portfolio/{item_id}/like")
+def like_portfolio(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(Portfolio).filter(Portfolio.id == item_id).first()
+    if not item: raise HTTPException(404, "Not found")
+    item.likes = (item.likes or 0) + 1
+    db.commit()
+    return {"likes": item.likes}
+
+# ==================== DUPLICATE ====================
+
+@app.post("/api/portfolio/{item_id}/duplicate", response_model=PortfolioResponse)
+def duplicate_portfolio(item_id: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = db.query(Portfolio).filter(Portfolio.id == item_id).first()
+    if not item: raise HTTPException(404, "Not found")
+    new_item = Portfolio(
+        category_id=item.category_id, title=f"{item.title} (Copy)",
+        description=item.description, thumbnail_url=item.thumbnail_url,
+        video_url=item.video_url, video_type=item.video_type,
+        embed_code=item.embed_code, featured=False, order=item.order,
+        aspect_ratio=item.aspect_ratio, collaborators=item.collaborators,
+        bts_photos=item.bts_photos, seo_title=item.seo_title,
+        seo_description=item.seo_description
+    )
+    db.add(new_item); db.commit(); db.refresh(new_item)
+    return new_item
+
+# ==================== CATEGORIES REORDER ====================
+
+@app.put("/api/categories/reorder")
+def reorder_categories(data: CategoryReorderRequest, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    for i, cat_id in enumerate(data.ids):
+        cat = db.query(Category).filter(Category.id == cat_id).first()
+        if cat: cat.order = i
+    db.commit()
+    return {"ok": True}
+
+# ==================== CHANGE PASSWORD ====================
+
+@app.put("/api/auth/change-password")
+def change_password(data: ChangePasswordRequest, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user or user.password_hash != data.current_password:
+        raise HTTPException(400, "Current password is incorrect")
+    user.password_hash = data.new_password
+    db.commit()
+    return {"ok": True}
+
+# ==================== DATA EXPORT ====================
+
+@app.get("/api/export")
+def export_data(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    import json
+    portfolio = db.query(Portfolio).all()
+    categories = db.query(Category).all()
+    testimonials = db.query(Testimonial).all()
+    settings = db.query(Settings).first()
+    return {
+        "exported_at": str(datetime.utcnow()),
+        "settings": {c.name: getattr(settings, c.name) for c in Settings.__table__.columns} if settings else {},
+        "categories": [{"id": c.id, "name": c.name, "slug": c.slug} for c in categories],
+        "portfolio": [{"id": p.id, "title": p.title, "video_url": p.video_url, "views": p.views, "likes": p.likes} for p in portfolio],
+        "testimonials": [{"name": t.name, "role": t.role, "text": t.text, "rating": t.rating} for t in testimonials],
     }
 
 # ==================== HEALTH CHECK ====================
