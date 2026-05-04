@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, R
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float, func
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float, func, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from pydantic import BaseModel
 from datetime import datetime, timedelta
@@ -205,6 +205,50 @@ class Visit(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+# ==================== MIGRATIONS ====================
+def _run_migrations():
+    is_pg = 'postgresql' in DATABASE_URL
+    migrations = [
+        ("settings", "whatsapp", "VARCHAR"),
+        ("settings", "tiktok", "VARCHAR"),
+        ("settings", "snapchat", "VARCHAR"),
+        ("settings", "hero_image", "VARCHAR"),
+        ("settings", "showreel_url", "VARCHAR"),
+        ("settings", "about_text", "TEXT"),
+        ("settings", "about_image", "VARCHAR"),
+        ("settings", "reel_of_month_id", "INTEGER"),
+        ("settings", "ga_tracking_id", "VARCHAR"),
+        ("settings", "maintenance_mode", "BOOLEAN"),
+        ("settings", "site_title_ar", "VARCHAR"),
+        ("settings", "site_description_ar", "TEXT"),
+        ("settings", "about_text_ar", "TEXT"),
+        ("settings", "booking_enabled", "BOOLEAN"),
+        ("settings", "available_for_booking", "BOOLEAN"),
+        ("settings", "availability_text", "VARCHAR"),
+        ("portfolios", "likes", "INTEGER"),
+        ("portfolios", "reactions", "TEXT"),
+        ("portfolios", "aspect_ratio", "VARCHAR"),
+        ("portfolios", "collaborators", "TEXT"),
+        ("portfolios", "bts_photos", "TEXT"),
+        ("portfolios", "seo_title", "VARCHAR"),
+        ("portfolios", "seo_description", "TEXT"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in migrations:
+            try:
+                if is_pg:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{col}" {col_type}'))
+                else:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN "{col}" {col_type}'))
+            except Exception:
+                pass
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
+_run_migrations()
 
 # Seed admin user from .env on first run
 def _seed_admin():
