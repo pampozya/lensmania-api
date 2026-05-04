@@ -476,6 +476,23 @@ def create_category(
     db.refresh(db_category)
     return db_category
 
+@app.put("/api/categories/{cat_id}", response_model=CategoryResponse)
+def update_category(cat_id: int, category: CategoryCreate, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    cat = db.query(Category).filter(Category.id == cat_id).first()
+    if not cat: raise HTTPException(404, "Not found")
+    cat.name = category.name
+    cat.slug = category.slug
+    cat.description = category.description
+    db.commit(); db.refresh(cat)
+    return cat
+
+@app.delete("/api/categories/{cat_id}")
+def delete_category(cat_id: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    cat = db.query(Category).filter(Category.id == cat_id).first()
+    if not cat: raise HTTPException(404, "Not found")
+    db.delete(cat); db.commit()
+    return {"ok": True}
+
 # ==================== PORTFOLIO ROUTES ====================
 
 @app.get("/api/portfolio", response_model=List[PortfolioResponse])
