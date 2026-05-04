@@ -24,6 +24,7 @@ import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+import io
 
 # Load environment variables
 load_dotenv()
@@ -167,6 +168,7 @@ class Testimonial(Base):
     photo_url = Column(String, nullable=True)
     order = Column(Integer, default=0)
     active = Column(Boolean, default=True)
+    approved = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Notification(Base):
@@ -233,6 +235,7 @@ def _run_migrations():
         ("portfolios", "bts_photos", "TEXT"),
         ("portfolios", "seo_title", "VARCHAR"),
         ("portfolios", "seo_description", "TEXT"),
+        ("testimonials", "approved", "BOOLEAN"),
     ]
     with engine.connect() as conn:
         for table, col, col_type in migrations:
@@ -363,6 +366,7 @@ class TestimonialResponse(BaseModel):
     photo_url: Optional[str]
     order: int
     active: bool
+    approved: bool = False
     created_at: datetime
 
     class Config:
@@ -692,6 +696,27 @@ ALLOWED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.webp',
 }
 
+def _cloudinary_upload(file_bytes: bytes, filename: str, resource_type: str = "auto"):
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        cloudinary.config(
+            cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+            api_key=os.getenv("CLOUDINARY_API_KEY"),
+            api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+            secure=True
+        )
+        result = cloudinary.uploader.upload(
+            io.BytesIO(file_bytes),
+            resource_type=resource_type,
+            folder="lensmania",
+            public_id=str(uuid.uuid4())
+        )
+        return result.get("secure_url")
+    except Exception as e:
+        print(f"[Cloudinary] {e}")
+        return None
+
 @app.post("/api/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -701,11 +726,22 @@ async def upload_file(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File type '{ext}' not allowed")
 
+    file_bytes = await file.read()
+    use_cloudinary = os.getenv("CLOUDINARY_CLOUD_NAME")
+
+    if use_cloudinary:
+        is_video = ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+        resource_type = "video" if is_video else "image"
+        url = await asyncio.to_thread(_cloudinary_upload, file_bytes, file.filename, resource_type)
+        if url:
+            return {"url": url, "filename": file.filename}
+        raise HTTPException(500, "Cloudinary upload failed")
+
+    # Fallback: local storage
     filename = f"{uuid.uuid4()}{ext}"
     dest = UPLOAD_DIR / filename
     with dest.open("wb") as buf:
-        shutil.copyfileobj(file.file, buf)
-
+        buf.write(file_bytes)
     return {"url": f"/uploads/{filename}", "filename": filename}
 
 # ==================== ANALYTICS & TRACKING ====================
@@ -826,17 +862,43 @@ def get_analytics(email: str = Depends(verify_token), db: Session = Depends(get_
 
 @app.get("/api/testimonials", response_model=List[TestimonialResponse])
 def get_testimonials(db: Session = Depends(get_db)):
-    return db.query(Testimonial).filter(Testimonial.active == True).order_by(Testimonial.order).all()
+    return db.query(Testimonial).filter(Testimonial.active == True, Testimonial.approved == True).order_by(Testimonial.order).all()
 
 @app.get("/api/testimonials/all", response_model=List[TestimonialResponse])
 def get_all_testimonials(email: str = Depends(verify_token), db: Session = Depends(get_db)):
-    return db.query(Testimonial).order_by(Testimonial.order).all()
+    return db.query(Testimonial).order_by(Testimonial.created_at.desc()).all()
+
+@app.post("/api/testimonials/submit")
+def submit_testimonial_public(t: TestimonialCreate, db: Session = Depends(get_db)):
+    item = Testimonial(**t.model_dump(), approved=False, active=True)
+    db.add(item); db.commit(); db.refresh(item)
+    try:
+        notif = Notification(type="contact", title=f"⭐ New review from {t.name} — awaiting approval")
+        db.add(notif); db.commit()
+    except: pass
+    return {"ok": True, "message": "Thank you! Your review is pending approval."}
 
 @app.post("/api/testimonials", response_model=TestimonialResponse)
 def create_testimonial(t: TestimonialCreate, email: str = Depends(verify_token), db: Session = Depends(get_db)):
-    item = Testimonial(**t.model_dump())
+    item = Testimonial(**t.model_dump(), approved=True)
     db.add(item); db.commit(); db.refresh(item)
     return item
+
+@app.put("/api/testimonials/{tid}/approve")
+def approve_testimonial(tid: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = db.query(Testimonial).filter(Testimonial.id == tid).first()
+    if not item: raise HTTPException(404, "Not found")
+    item.approved = not item.approved
+    db.commit()
+    return {"approved": item.approved}
+
+@app.put("/api/testimonials/{tid}/toggle-active")
+def toggle_testimonial(tid: int, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    item = db.query(Testimonial).filter(Testimonial.id == tid).first()
+    if not item: raise HTTPException(404, "Not found")
+    item.active = not item.active
+    db.commit()
+    return {"active": item.active}
 
 @app.put("/api/testimonials/{tid}", response_model=TestimonialResponse)
 def update_testimonial(tid: int, t: TestimonialCreate, email: str = Depends(verify_token), db: Session = Depends(get_db)):
