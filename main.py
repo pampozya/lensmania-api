@@ -1114,6 +1114,18 @@ def delete_notification(nid: int, email: str = Depends(verify_token), db: Sessio
 class ThumbnailRequest(BaseModel):
     url: str
 
+def _scrape_og(html: str) -> dict:
+    """Extract og:title, og:description, og:image from raw HTML."""
+    import re as _re
+    result = {}
+    for prop in ('title', 'description', 'image'):
+        m = _re.search(rf'<meta[^>]+property=["\']og:{prop}["\'][^>]+content=["\']([^"\']+)["\']', html)
+        if not m:
+            m = _re.search(rf'content=["\']([^"\']+)["\'][^>]+property=["\']og:{prop}["\']', html)
+        if m:
+            result[prop] = m.group(1).strip()
+    return result
+
 @app.post("/api/fetch-thumbnail")
 async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_token)):
     url = data.url.strip()
@@ -1123,15 +1135,22 @@ async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_to
     yt = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})', url)
     if yt:
         vid = yt.group(1)
+        # Scrape og meta for title/description
+        meta = {}
+        try:
+            async with httpx.AsyncClient(timeout=6, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as c:
+                r = await c.get(url)
+                meta = _scrape_og(r.text)
+        except: pass
         for quality in ['maxresdefault', 'hqdefault', 'mqdefault']:
             thumb = f"https://img.youtube.com/vi/{vid}/{quality}.jpg"
             try:
                 async with httpx.AsyncClient(timeout=5) as c:
                     r = await c.head(thumb)
                     if r.status_code == 200:
-                        return {"thumbnail_url": thumb, "platform": "youtube"}
+                        return {"thumbnail_url": thumb, "platform": "youtube", **meta}
             except: pass
-        return {"thumbnail_url": f"https://img.youtube.com/vi/{vid}/hqdefault.jpg", "platform": "youtube"}
+        return {"thumbnail_url": f"https://img.youtube.com/vi/{vid}/hqdefault.jpg", "platform": "youtube", **meta}
 
     # Vimeo
     if 'vimeo.com' in url:
@@ -1140,7 +1159,8 @@ async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_to
                 r = await c.get(f"https://vimeo.com/api/oembed.json?url={url}&width=1280")
                 d = r.json()
                 if d.get('thumbnail_url'):
-                    return {"thumbnail_url": d['thumbnail_url'], "platform": "vimeo"}
+                    return {"thumbnail_url": d['thumbnail_url'], "platform": "vimeo",
+                            "title": d.get('title', ''), "description": d.get('description', '')}
         except: pass
 
     # TikTok
@@ -1150,7 +1170,8 @@ async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_to
                 r = await c.get(f"https://www.tiktok.com/oembed?url={url}")
                 d = r.json()
                 if d.get('thumbnail_url'):
-                    return {"thumbnail_url": d['thumbnail_url'], "platform": "tiktok"}
+                    return {"thumbnail_url": d['thumbnail_url'], "platform": "tiktok",
+                            "title": d.get('title', ''), "description": ""}
         except: pass
 
     # Dailymotion
@@ -1159,36 +1180,45 @@ async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_to
         if dm:
             try:
                 async with httpx.AsyncClient(timeout=8) as c:
-                    r = await c.get(f"https://api.dailymotion.com/video/{dm.group(1)}?fields=thumbnail_1080_url,thumbnail_url")
+                    r = await c.get(f"https://api.dailymotion.com/video/{dm.group(1)}?fields=thumbnail_1080_url,thumbnail_url,title,description")
                     d = r.json()
                     thumb = d.get('thumbnail_1080_url') or d.get('thumbnail_url')
                     if thumb:
-                        return {"thumbnail_url": thumb, "platform": "dailymotion"}
+                        return {"thumbnail_url": thumb, "platform": "dailymotion",
+                                "title": d.get('title', ''), "description": d.get('description', '')}
             except: pass
 
     # Twitter/X
     if 'twitter.com' in url or 'x.com' in url:
         try:
-            async with httpx.AsyncClient(timeout=8) as c:
-                r = await c.get(f"https://publish.twitter.com/oembed?url={url}")
-                d = r.json()
-                # Twitter oembed doesn't return thumbnails directly, return None
+            async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as c:
+                r = await c.get(url)
+                meta = _scrape_og(r.text)
+                if meta:
+                    return {"thumbnail_url": meta.get('image'), "platform": "twitter", **meta}
         except: pass
 
-    # Instagram — try og:image scrape (auth-free)
+    # Instagram — try og scrape
     if 'instagram.com' in url:
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
             async with httpx.AsyncClient(timeout=8, headers=headers, follow_redirects=True) as c:
                 r = await c.get(url)
-                import re as _re
-                m = _re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text)
-                if not m:
-                    m = _re.search(r'content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
-                if m:
-                    return {"thumbnail_url": m.group(1), "platform": "instagram"}
+                meta = _scrape_og(r.text)
+                if meta.get('image'):
+                    return {"thumbnail_url": meta['image'], "platform": "instagram",
+                            "title": meta.get('title', ''), "description": meta.get('description', '')}
         except: pass
         return {"thumbnail_url": None, "platform": "instagram", "manual": True}
+
+    # Generic og scrape fallback
+    try:
+        async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as c:
+            r = await c.get(url)
+            meta = _scrape_og(r.text)
+            if meta:
+                return {"thumbnail_url": meta.get('image'), "platform": "unknown", **meta}
+    except: pass
 
     return {"thumbnail_url": None, "platform": "unknown"}
 
@@ -1280,6 +1310,30 @@ async def ai_best_thumbnail(data: AIThumbnailRequest, email: str = Depends(verif
 def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.utcnow()}
+
+# ==================== TRANSLATE ====================
+
+class TranslateRequest(BaseModel):
+    text: str
+    target: str = "en"  # "en" or "ar"
+
+@app.post("/api/translate")
+async def translate_text(data: TranslateRequest):
+    if not data.text or not data.text.strip():
+        raise HTTPException(400, "No text provided")
+    if len(data.text) > 2000:
+        raise HTTPException(400, "Text too long (max 2000 chars)")
+    client = _get_anthropic()
+    target_lang = "English" if data.target == "en" else "Arabic"
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        messages=[{
+            "role": "user",
+            "content": f"Translate the following text to {target_lang}. Return only the translation, no explanation, no quotes:\n\n{data.text.strip()}"
+        }]
+    )
+    return {"translation": msg.content[0].text.strip()}
 
 # ==================== ROOT ====================
 
