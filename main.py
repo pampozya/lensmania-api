@@ -696,26 +696,24 @@ ALLOWED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.webp',
 }
 
-def _cloudinary_upload(file_bytes: bytes, filename: str, resource_type: str = "auto"):
-    try:
-        import cloudinary
-        import cloudinary.uploader
-        cloudinary.config(
-            cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-            api_key=os.getenv("CLOUDINARY_API_KEY"),
-            api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-            secure=True
-        )
-        result = cloudinary.uploader.upload(
-            io.BytesIO(file_bytes),
-            resource_type=resource_type,
-            folder="lensmania",
-            public_id=str(uuid.uuid4())
-        )
-        return result.get("secure_url")
-    except Exception as e:
-        print(f"[Cloudinary] {e}")
-        return None
+def _cloudinary_upload(file_bytes: bytes, resource_type: str = "auto"):
+    import cloudinary
+    import cloudinary.uploader
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+        api_key=os.getenv("CLOUDINARY_API_KEY"),
+        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+        secure=True
+    )
+    result = cloudinary.uploader.upload(
+        io.BytesIO(file_bytes),
+        resource_type=resource_type,
+        folder="lensmania",
+        public_id=str(uuid.uuid4()),
+        chunk_size=6000000,
+        timeout=120
+    )
+    return result["secure_url"]
 
 @app.post("/api/upload")
 async def upload_file(
@@ -732,10 +730,13 @@ async def upload_file(
     if use_cloudinary:
         is_video = ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
         resource_type = "video" if is_video else "image"
-        url = await asyncio.to_thread(_cloudinary_upload, file_bytes, file.filename, resource_type)
-        if url:
+        try:
+            url = await asyncio.to_thread(_cloudinary_upload, file_bytes, resource_type)
             return {"url": url, "filename": file.filename}
-        raise HTTPException(500, "Cloudinary upload failed")
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[Cloudinary error] {error_msg}")
+            raise HTTPException(500, f"Upload failed: {error_msg}")
 
     # Fallback: local storage
     filename = f"{uuid.uuid4()}{ext}"
