@@ -1175,15 +1175,20 @@ async def fetch_thumbnail(data: ThumbnailRequest, email: str = Depends(verify_to
                 # Twitter oembed doesn't return thumbnails directly, return None
         except: pass
 
-    # Instagram — try oembed (may require token)
+    # Instagram — try og:image scrape (auth-free)
     if 'instagram.com' in url:
         try:
-            async with httpx.AsyncClient(timeout=8) as c:
-                r = await c.get(f"https://api.instagram.com/oembed?url={url}")
-                d = r.json()
-                if d.get('thumbnail_url'):
-                    return {"thumbnail_url": d['thumbnail_url'], "platform": "instagram"}
+            headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+            async with httpx.AsyncClient(timeout=8, headers=headers, follow_redirects=True) as c:
+                r = await c.get(url)
+                import re as _re
+                m = _re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text)
+                if not m:
+                    m = _re.search(r'content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
+                if m:
+                    return {"thumbnail_url": m.group(1), "platform": "instagram"}
         except: pass
+        return {"thumbnail_url": None, "platform": "instagram", "manual": True}
 
     return {"thumbnail_url": None, "platform": "unknown"}
 
