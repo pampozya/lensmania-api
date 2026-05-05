@@ -200,6 +200,7 @@ class ContactSubmission(Base):
     email = Column(String)
     service = Column(String, nullable=True)
     message = Column(Text)
+    source = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Visit(Base):
@@ -210,6 +211,26 @@ class Visit(Base):
     country = Column(String, nullable=True)
     city = Column(String, nullable=True)
     user_agent = Column(String, nullable=True)
+    utm_source = Column(String, nullable=True)
+
+class ReviewSession(Base):
+    __tablename__ = "review_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True)
+    portfolio_id = Column(Integer, index=True)
+    client_name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+
+class ReviewComment(Base):
+    __tablename__ = "review_comments"
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, index=True)
+    timestamp_sec = Column(Float, default=0)
+    text = Column(Text)
+    author = Column(String, nullable=True)
+    resolved = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -238,6 +259,8 @@ def _run_migrations():
         ("settings", "color_background", "VARCHAR"),
         ("settings", "color_surface", "VARCHAR"),
         ("settings", "color_text", "VARCHAR"),
+        ("contact_submissions", "source", "VARCHAR"),
+        ("visits", "utm_source", "VARCHAR"),
         ("portfolios", "likes", "INTEGER"),
         ("portfolios", "reactions", "TEXT"),
         ("portfolios", "aspect_ratio", "VARCHAR"),
@@ -448,6 +471,7 @@ class ContactRequest(BaseModel):
     email: str
     service: Optional[str] = None
     message: str
+    source: Optional[str] = None
 
 class NotificationResponse(BaseModel):
     id: int
@@ -848,15 +872,20 @@ async def _enrich_visit(visit_id: int, ip: str, ua: str, ts: datetime):
         if recent_count <= 1:
             await _send_visit_email(ip, country, city, ua, ts)
 
+class TrackRequest(BaseModel):
+    utm_source: Optional[str] = None
+
 @app.post("/api/track")
 async def track_visit(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     forwarded = request.headers.get("X-Forwarded-For", "")
     ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
     ua = request.headers.get("User-Agent", "")[:200]
-    visit = Visit(ip=ip, user_agent=ua)
-    db.add(visit)
-    db.commit()
-    db.refresh(visit)
+    try:
+        body = await request.json()
+        utm = body.get("utm_source")
+    except: utm = None
+    visit = Visit(ip=ip, user_agent=ua, utm_source=utm)
+    db.add(visit); db.commit(); db.refresh(visit)
     background_tasks.add_task(_enrich_visit, visit.id, ip, ua, visit.timestamp)
     return {"ok": True}
 
@@ -1074,7 +1103,7 @@ async def _send_interested_email(title: str, count: int, ip: str):
 
 @app.post("/api/contact")
 async def submit_contact(data: ContactRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    submission = ContactSubmission(name=data.name, email=data.email, service=data.service, message=data.message)
+    submission = ContactSubmission(name=data.name, email=data.email, service=data.service, message=data.message, source=data.source)
     db.add(submission); db.commit()
     notif = Notification(type="contact", title=f"📩 New inquiry from {data.name}", body=f"Service: {data.service or 'Not specified'}\n{data.message[:100]}")
     db.add(notif); db.commit()
@@ -1315,6 +1344,93 @@ async def ai_best_thumbnail(data: AIThumbnailRequest, email: str = Depends(verif
         return {"best_frame": best, "reason": reason}
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
+
+# ==================== REVIEW PORTAL ====================
+
+class ReviewSessionCreate(BaseModel):
+    portfolio_id: int
+    client_name: Optional[str] = None
+    expires_days: Optional[int] = 30
+
+class ReviewCommentCreate(BaseModel):
+    timestamp_sec: float
+    text: str
+    author: Optional[str] = "Client"
+
+@app.post("/api/review-sessions")
+def create_review_session(data: ReviewSessionCreate, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    import secrets
+    token = secrets.token_urlsafe(16)
+    expires = datetime.utcnow() + timedelta(days=data.expires_days or 30)
+    session = ReviewSession(token=token, portfolio_id=data.portfolio_id, client_name=data.client_name, expires_at=expires)
+    db.add(session); db.commit(); db.refresh(session)
+    return {"token": token, "id": session.id, "expires_at": expires}
+
+@app.get("/api/review-sessions")
+def list_review_sessions(db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    sessions = db.query(ReviewSession).order_by(ReviewSession.created_at.desc()).all()
+    result = []
+    for s in sessions:
+        comments = db.query(ReviewComment).filter(ReviewComment.session_id == s.id).all()
+        result.append({"id": s.id, "token": s.token, "portfolio_id": s.portfolio_id,
+                        "client_name": s.client_name, "created_at": s.created_at,
+                        "expires_at": s.expires_at, "comment_count": len(comments)})
+    return result
+
+@app.delete("/api/review-sessions/{session_id}")
+def delete_review_session(session_id: int, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    db.query(ReviewComment).filter(ReviewComment.session_id == session_id).delete()
+    db.query(ReviewSession).filter(ReviewSession.id == session_id).delete()
+    db.commit(); return {"ok": True}
+
+@app.get("/api/review/{token}")
+def get_review(token: str, db: Session = Depends(get_db)):
+    s = db.query(ReviewSession).filter(ReviewSession.token == token).first()
+    if not s: raise HTTPException(404, "Review link not found")
+    if s.expires_at and s.expires_at < datetime.utcnow(): raise HTTPException(410, "Review link expired")
+    item = db.query(Portfolio).filter(Portfolio.id == s.portfolio_id).first()
+    if not item: raise HTTPException(404, "Video not found")
+    comments = db.query(ReviewComment).filter(ReviewComment.session_id == s.id).order_by(ReviewComment.timestamp_sec).all()
+    return {"session": {"id": s.id, "client_name": s.client_name, "expires_at": s.expires_at},
+            "portfolio": {"id": item.id, "title": item.title, "description": item.description,
+                          "video_url": item.video_url, "video_type": item.video_type,
+                          "thumbnail_url": item.thumbnail_url, "aspect_ratio": item.aspect_ratio,
+                          "embed_code": item.embed_code},
+            "comments": [{"id": c.id, "timestamp_sec": c.timestamp_sec, "text": c.text,
+                           "author": c.author, "resolved": c.resolved, "created_at": c.created_at} for c in comments]}
+
+@app.post("/api/review/{token}/comments")
+def add_review_comment(token: str, data: ReviewCommentCreate, db: Session = Depends(get_db)):
+    s = db.query(ReviewSession).filter(ReviewSession.token == token).first()
+    if not s: raise HTTPException(404, "Review link not found")
+    if s.expires_at and s.expires_at < datetime.utcnow(): raise HTTPException(410, "Link expired")
+    c = ReviewComment(session_id=s.id, timestamp_sec=data.timestamp_sec, text=data.text, author=data.author or "Client")
+    db.add(c); db.commit(); db.refresh(c)
+    _create_notification(db, "review", f"New comment from {c.author}", f'"{data.text}" at {int(data.timestamp_sec)}s')
+    return {"id": c.id, "timestamp_sec": c.timestamp_sec, "text": c.text, "author": c.author, "resolved": c.resolved, "created_at": c.created_at}
+
+@app.put("/api/review/comments/{comment_id}/resolve")
+def resolve_comment(comment_id: int, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    c = db.query(ReviewComment).filter(ReviewComment.id == comment_id).first()
+    if not c: raise HTTPException(404)
+    c.resolved = not c.resolved; db.commit()
+    return {"resolved": c.resolved}
+
+@app.get("/api/review-sessions/{session_id}/comments")
+def get_session_comments(session_id: int, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    comments = db.query(ReviewComment).filter(ReviewComment.session_id == session_id).order_by(ReviewComment.timestamp_sec).all()
+    return [{"id": c.id, "timestamp_sec": c.timestamp_sec, "text": c.text, "author": c.author,
+             "resolved": c.resolved, "created_at": c.created_at} for c in comments]
+
+# ==================== INQUIRY SOURCE ====================
+
+@app.get("/api/analytics/sources")
+def get_inquiry_sources(db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    from sqlalchemy import func
+    contact_sources = db.query(ContactSubmission.source, func.count(ContactSubmission.id)).group_by(ContactSubmission.source).all()
+    utm_sources = db.query(Visit.utm_source, func.count(Visit.id)).filter(Visit.utm_source != None).group_by(Visit.utm_source).all()
+    return {"contact_sources": [{"source": s or "Direct", "count": c} for s, c in contact_sources],
+            "utm_sources": [{"source": s, "count": c} for s, c in utm_sources]}
 
 # ==================== HEALTH CHECK ====================
 
