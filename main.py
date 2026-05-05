@@ -158,6 +158,10 @@ class Settings(Base):
     booking_enabled = Column(Boolean, default=True)
     available_for_booking = Column(Boolean, default=True)
     availability_text = Column(String, nullable=True)
+    color_primary = Column(String, nullable=True)
+    color_background = Column(String, nullable=True)
+    color_surface = Column(String, nullable=True)
+    color_text = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Testimonial(Base):
@@ -230,6 +234,10 @@ def _run_migrations():
         ("settings", "booking_enabled", "BOOLEAN"),
         ("settings", "available_for_booking", "BOOLEAN"),
         ("settings", "availability_text", "VARCHAR"),
+        ("settings", "color_primary", "VARCHAR"),
+        ("settings", "color_background", "VARCHAR"),
+        ("settings", "color_surface", "VARCHAR"),
+        ("settings", "color_text", "VARCHAR"),
         ("portfolios", "likes", "INTEGER"),
         ("portfolios", "reactions", "TEXT"),
         ("portfolios", "aspect_ratio", "VARCHAR"),
@@ -424,6 +432,10 @@ class SettingsResponse(BaseModel):
     booking_enabled: bool = True
     available_for_booking: bool = True
     availability_text: Optional[str]
+    color_primary: Optional[str]
+    color_background: Optional[str]
+    color_surface: Optional[str]
+    color_text: Optional[str]
 
     class Config:
         from_attributes = True
