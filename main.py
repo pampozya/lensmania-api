@@ -232,6 +232,20 @@ class ReviewComment(Base):
     resolved = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class ClientDelivery(Base):
+    __tablename__ = "client_deliveries"
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True)
+    client_name = Column(String, nullable=False)
+    project_title = Column(String, nullable=False)
+    message = Column(Text, nullable=True)
+    files = Column(Text, default='[]')  # JSON array
+    password = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    download_count = Column(Integer, default=0)
+    last_accessed = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -1431,6 +1445,100 @@ def get_inquiry_sources(db: Session = Depends(get_db), email: str = Depends(veri
     utm_sources = db.query(Visit.utm_source, func.count(Visit.id)).filter(Visit.utm_source != None).group_by(Visit.utm_source).all()
     return {"contact_sources": [{"source": s or "Direct", "count": c} for s, c in contact_sources],
             "utm_sources": [{"source": s, "count": c} for s, c in utm_sources]}
+
+# ==================== CLIENT DELIVERIES ====================
+
+class DeliveryFile(BaseModel):
+    name: str
+    url: str
+    size_mb: Optional[float] = None
+    note: Optional[str] = None
+
+class DeliveryCreate(BaseModel):
+    client_name: str
+    project_title: str
+    message: Optional[str] = None
+    files: List[DeliveryFile] = []
+    password: Optional[str] = None
+    expires_days: Optional[int] = 30
+
+@app.post("/api/deliveries")
+def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    import secrets, json
+    token = secrets.token_urlsafe(16)
+    expires = datetime.utcnow() + timedelta(days=data.expires_days) if data.expires_days else None
+    delivery = ClientDelivery(
+        token=token,
+        client_name=data.client_name,
+        project_title=data.project_title,
+        message=data.message,
+        files=json.dumps([f.dict() for f in data.files]),
+        password=data.password or None,
+        expires_at=expires,
+    )
+    db.add(delivery); db.commit(); db.refresh(delivery)
+    return {"id": delivery.id, "token": token, "expires_at": expires}
+
+@app.get("/api/deliveries")
+def list_deliveries(db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    import json
+    items = db.query(ClientDelivery).order_by(ClientDelivery.created_at.desc()).all()
+    return [{
+        "id": d.id, "token": d.token, "client_name": d.client_name, "project_title": d.project_title,
+        "message": d.message, "files": json.loads(d.files or '[]'),
+        "has_password": bool(d.password), "expires_at": d.expires_at,
+        "download_count": d.download_count, "last_accessed": d.last_accessed,
+        "created_at": d.created_at,
+    } for d in items]
+
+@app.put("/api/deliveries/{delivery_id}")
+def update_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    import json
+    d = db.query(ClientDelivery).filter(ClientDelivery.id == delivery_id).first()
+    if not d: raise HTTPException(404, "Not found")
+    d.client_name = data.client_name
+    d.project_title = data.project_title
+    d.message = data.message
+    d.files = json.dumps([f.dict() for f in data.files])
+    if data.password is not None: d.password = data.password or None
+    if data.expires_days is not None:
+        d.expires_at = datetime.utcnow() + timedelta(days=data.expires_days) if data.expires_days else None
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/deliveries/{delivery_id}")
+def delete_delivery(delivery_id: int, db: Session = Depends(get_db), email: str = Depends(verify_token)):
+    db.query(ClientDelivery).filter(ClientDelivery.id == delivery_id).delete()
+    db.commit(); return {"ok": True}
+
+class DeliveryAccess(BaseModel):
+    password: Optional[str] = None
+
+@app.post("/api/delivery/{token}/access")
+def access_delivery(token: str, body: DeliveryAccess, db: Session = Depends(get_db)):
+    import json
+    d = db.query(ClientDelivery).filter(ClientDelivery.token == token).first()
+    if not d: raise HTTPException(404, "Delivery not found")
+    if d.expires_at and d.expires_at < datetime.utcnow(): raise HTTPException(410, "This delivery link has expired")
+    if d.password and d.password != (body.password or ""):
+        return {"locked": True, "client_name": d.client_name, "project_title": d.project_title}
+    d.last_accessed = datetime.utcnow(); db.commit()
+    return {
+        "locked": False,
+        "client_name": d.client_name,
+        "project_title": d.project_title,
+        "message": d.message,
+        "files": json.loads(d.files or '[]'),
+        "expires_at": d.expires_at,
+        "download_count": d.download_count,
+    }
+
+@app.post("/api/delivery/{token}/track")
+def track_download(token: str, db: Session = Depends(get_db)):
+    d = db.query(ClientDelivery).filter(ClientDelivery.token == token).first()
+    if not d: raise HTTPException(404)
+    d.download_count = (d.download_count or 0) + 1
+    db.commit(); return {"count": d.download_count}
 
 # ==================== HEALTH CHECK ====================
 
