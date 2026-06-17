@@ -162,6 +162,7 @@ class Settings(Base):
     color_background = Column(String, nullable=True)
     color_surface = Column(String, nullable=True)
     color_text = Column(String, nullable=True)
+    og_image = Column(String, nullable=True)  # custom share image for the MAIN link (homepage) only
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Testimonial(Base):
@@ -273,6 +274,7 @@ def _run_migrations():
         ("settings", "color_background", "VARCHAR"),
         ("settings", "color_surface", "VARCHAR"),
         ("settings", "color_text", "VARCHAR"),
+        ("settings", "og_image", "VARCHAR"),
         ("contact_submissions", "source", "VARCHAR"),
         ("visits", "utm_source", "VARCHAR"),
         ("portfolios", "likes", "INTEGER"),
@@ -426,6 +428,9 @@ class ChangePasswordRequest(BaseModel):
 class CategoryReorderRequest(BaseModel):
     ids: List[int]
 
+class PortfolioReorderRequest(BaseModel):
+    ids: List[int]
+
 class AboutCreate(BaseModel):
     title: str
     bio: str
@@ -473,6 +478,7 @@ class SettingsResponse(BaseModel):
     color_background: Optional[str]
     color_surface: Optional[str]
     color_text: Optional[str]
+    og_image: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -614,6 +620,16 @@ def get_portfolio(
     
     items = query.order_by(Portfolio.order).all()
     return items
+
+@app.put("/api/portfolio/reorder")
+def reorder_portfolio(data: PortfolioReorderRequest, email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Set each portfolio item's order to its index in the given id list (admin only).
+    Mirrors reorder_categories; used by the featured 'Selected Work' drag-reorder UI."""
+    for i, item_id in enumerate(data.ids):
+        item = db.query(Portfolio).filter(Portfolio.id == item_id).first()
+        if item: item.order = i
+    db.commit()
+    return {"ok": True}
 
 @app.get("/api/portfolio/{item_id}", response_model=PortfolioResponse)
 def get_portfolio_item(item_id: int, db: Session = Depends(get_db)):
